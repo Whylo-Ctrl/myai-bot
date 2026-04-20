@@ -1,5 +1,6 @@
 import os
 import re
+from collections import defaultdict, deque
 from datetime import datetime
 
 import discord
@@ -23,6 +24,19 @@ intents.members = True
 
 bot = commands.Bot(command_prefix="!", intents=intents, help_command=None)
 
+# ---------------------------
+# MEMORY
+# ---------------------------
+# Keeps the last few messages per channel so replies feel more natural.
+channel_memory = defaultdict(lambda: deque(maxlen=12))
+
+FAQ = {
+    "what is this server": "This is The GuBz Family server — a place for gaming, streaming, ideas, and community stuff.",
+    "where do i post ideas": "Drop ideas in #stream-ideas-plans.",
+    "where do i post random stuff": "Use #off-topic for random convos.",
+    "where are announcements": "Check #announcements.",
+}
+
 SYSTEM_PROMPT = f"""
 You are MyAI, a real-feeling Discord server assistant.
 
@@ -36,48 +50,61 @@ How to act:
 - Sound human, not robotic
 - Never say "as an AI"
 - Never sound like customer support
-- You can be funny and chill, but not cringe
+- Be funny, streamer-ish, and socially aware, but not cringe
+- Match the vibe of the chat
 
 Important rules:
-- Never pretend you actually changed, deleted, renamed, assigned, or moderated anything unless a real bot action did it
-- Never tell users to use bot commands if the bot can handle it directly
-- If you're unsure about live info, current events, or release dates, say so briefly instead of making things up
-- Never confidently invent fake current facts
+- Never pretend you changed, renamed, assigned, deleted, or created anything unless the real bot logic already did it
+- Never tell users to use commands if the bot can already handle the action
+- If something is current/live and you aren't fully sure, say so briefly
+- Do not make up fake release dates, fake trends, or fake current events
 """
 
-FAQ = {
-    "what is this server": "This is The GuBz Family server — a place for gaming, streaming, ideas, and community stuff.",
-    "where do i post ideas": "Drop ideas in #stream-ideas-plans.",
-    "where do i post random stuff": "Use #off-topic for random convos.",
-    "where are announcements": "Check #announcements.",
-}
+# ---------------------------
+# HELPERS
+# ---------------------------
+def needs_live_info(text: str) -> bool:
+    text = text.lower()
+    triggers = [
+        "latest", "current", "currently", "right now", "today", "tonight",
+        "this week", "this month", "up to date", "up-to-date", "news",
+        "release date", "releases", "what happened", "president",
+        "weather", "score", "scores", "price", "prices",
+        "what games are dropping", "what games are coming out",
+        "trending", "trend", "popular right now", "hot right now",
+        "stream right now", "best game to stream right now"
+    ]
+    return any(trigger in text for trigger in triggers)
 
+def should_auto_reply(message: discord.Message) -> bool:
+    if bot.user in message.mentions:
+        return True
 
-def ask_myai(user_input: str) -> str:
+    # Make a dedicated channel like #ai-chat or #myai for free-flow convo
+    if message.channel.name in {"ai-chat", "myai", "ask-myai"}:
+        return True
+
+    # Lightweight natural triggers
+    content = message.content.lower()
+    triggers = ["myai", "bot", "whylo ai"]
+    return any(trigger in content for trigger in triggers)
+
+def build_messages(channel_id: int, user_input: str):
+    messages = [{"role": "system", "content": SYSTEM_PROMPT}]
+    for role, content in channel_memory[channel_id]:
+        messages.append({"role": role, "content": content})
+    messages.append({"role": "user", "content": user_input})
+    return messages
+
+def ask_myai(channel_id: int, user_input: str) -> str:
+    model_name = "groq/compound-mini" if needs_live_info(user_input) else "llama-3.1-8b-instant"
+
     response = client.chat.completions.create(
-        model="llama-3.1-8b-instant",
-        messages=[
-            {"role": "system", "content": SYSTEM_PROMPT},
-            {
-                "role": "user",
-                "content": f"""
-Today is {datetime.now().strftime("%Y-%m-%d")}.
-
-User asked:
-{user_input}
-
-Reply like a real person in Discord.
-If something is current/live and you are not sure, say so briefly.
-Do not mention commands unless the user directly asks for commands.
-"""
-            }
-        ]
+        model=model_name,
+        messages=build_messages(channel_id, user_input)
     )
 
-    reply = response.choices[0].message.content
-
-    if not reply:
-        reply = "I got nothing right now 😅"
+    reply = response.choices[0].message.content or "I got nothing right now 😅"
 
     if len(reply) > 1900:
         reply = reply[:1900] + "..."
@@ -86,13 +113,29 @@ Do not mention commands unless the user directly asks for commands.
     if "it's currently 2024" in lowered or "it is currently 2024" in lowered:
         reply = f"It's currently {datetime.now().year} 😅 my bad"
 
+    # Save short-term memory
+    channel_memory[channel_id].append(("user", user_input))
+    channel_memory[channel_id].append(("assistant", reply))
+
     return reply
 
+def extract_nickname(text: str) -> str | None:
+    patterns = [
+        r"(?:nickname|rename|change name).+?(?:to|as)\s+(.+)",
+    ]
+    for pattern in patterns:
+        match = re.search(pattern, text, re.IGNORECASE)
+        if match:
+            nick = match.group(1).strip()
+            return nick.strip('"').strip("'").strip()[:32]
+    return None
 
 def extract_channel_name(text: str) -> str | None:
     patterns = [
         r"create (?:a )?(?:new )?(?:text )?channel (?:called |named )?(.+)",
         r"make (?:a )?(?:new )?(?:text )?channel (?:called |named )?(.+)",
+        r"create a (.+?) channel",
+        r"make a (.+?) channel",
     ]
     for pattern in patterns:
         match = re.search(pattern, text, re.IGNORECASE)
@@ -103,7 +146,6 @@ def extract_channel_name(text: str) -> str | None:
             name = re.sub(r"[^a-z0-9\-_]", "", name)
             return name[:100] if name else None
     return None
-
 
 def extract_role_name(text: str) -> str | None:
     patterns = [
@@ -117,30 +159,18 @@ def extract_role_name(text: str) -> str | None:
             return name.strip('"').strip("'").strip()
     return None
 
-
-def extract_nickname(text: str) -> str | None:
-    patterns = [
-        r"(?:nickname|rename).+?(?:to|as)\s+(.+)",
-    ]
-    for pattern in patterns:
-        match = re.search(pattern, text, re.IGNORECASE)
-        if match:
-            nick = match.group(1).strip()
-            return nick.strip('"').strip("'").strip()[:32]
-    return None
-
-
+# ---------------------------
+# EVENTS
+# ---------------------------
 @bot.event
 async def on_ready():
     print(f"{bot.user} is online!")
-
 
 @bot.event
 async def on_member_join(member):
     channel = discord.utils.get(member.guild.text_channels, name="general")
     if channel:
         await channel.send(f"Yo {member.mention}, welcome to **{member.guild.name}** 👋")
-
 
 @bot.event
 async def on_message(message):
@@ -155,31 +185,37 @@ async def on_message(message):
             await message.channel.send(answer)
             return
 
-    # =========================
+    # ---------------------------
     # REAL ACTIONS FIRST
-    # =========================
+    # ---------------------------
 
     # Nickname change
-    if any(word in content_lower for word in ["nickname", "rename"]):
-        if message.mentions:
-            member = message.mentions[0]
-            new_nick = extract_nickname(message.content)
+    if any(word in content_lower for word in ["nickname", "rename", "change name"]):
+        target_member = None
+        new_nick = extract_nickname(message.content)
 
-            if new_nick:
-                try:
-                    await member.edit(nick=new_nick)
-                    await message.channel.send(f"Done 👍 {member.mention} is now **{new_nick}**")
-                except discord.Forbidden:
-                    await message.channel.send("I don't have permission to change that nickname.")
-                except Exception as e:
-                    print("NICKNAME ERROR:", repr(e))
-                    await message.channel.send("I couldn't change that nickname.")
-                return
+        if message.mentions:
+            target_member = message.mentions[0]
+        else:
+            for member in message.guild.members:
+                if member.name.lower() in content_lower or member.display_name.lower() in content_lower:
+                    target_member = member
+                    break
+
+        if target_member and new_nick:
+            try:
+                await target_member.edit(nick=new_nick)
+                await message.channel.send(f"Done 👍 {target_member.mention} is now **{new_nick}**")
+            except discord.Forbidden:
+                await message.channel.send("I don't have permission to change that nickname.")
+            except Exception as e:
+                print("NICKNAME ERROR:", repr(e))
+                await message.channel.send("I couldn't change that nickname.")
+            return
 
     # Create channel
     if "channel" in content_lower and any(word in content_lower for word in ["create", "make"]):
         channel_name = extract_channel_name(message.content)
-
         if channel_name:
             existing = discord.utils.get(message.guild.text_channels, name=channel_name)
             if existing:
@@ -199,7 +235,6 @@ async def on_message(message):
     # Create role
     if "role" in content_lower and any(word in content_lower for word in ["create", "make"]):
         role_name = extract_role_name(message.content)
-
         if role_name:
             existing = discord.utils.get(message.guild.roles, name=role_name)
             if existing:
@@ -247,11 +282,10 @@ async def on_message(message):
                     await message.channel.send("I couldn't give that role.")
                 return
 
-    # =========================
+    # ---------------------------
     # AI CHAT AFTER ACTIONS
-    # =========================
-
-    if bot.user.mentioned_in(message):
+    # ---------------------------
+    if should_auto_reply(message):
         user_input = message.content
         user_input = user_input.replace(f"<@{bot.user.id}>", "")
         user_input = user_input.replace(f"<@!{bot.user.id}>", "")
@@ -262,7 +296,7 @@ async def on_message(message):
             return
 
         try:
-            reply = ask_myai(user_input)
+            reply = ask_myai(message.channel.id, user_input)
             await message.channel.send(reply)
         except Exception as e:
             print("GROQ ERROR:", repr(e))
@@ -270,130 +304,40 @@ async def on_message(message):
 
     await bot.process_commands(message)
 
-
+# ---------------------------
+# COMMANDS
+# ---------------------------
 @bot.command()
 async def ask(ctx, *, question):
     try:
-        reply = ask_myai(question)
+        reply = ask_myai(ctx.channel.id, question)
         await ctx.send(reply)
     except Exception as e:
         print("GROQ ERROR:", repr(e))
         await ctx.send("Something broke 😅")
 
+@bot.command()
+async def clearmemory(ctx):
+    channel_memory[ctx.channel.id].clear()
+    await ctx.send("Cleared chat memory for this channel.")
 
 @bot.command()
 async def announce(ctx, *, topic):
     try:
         prompt = f"Write a clean Discord server announcement about: {topic}"
-        reply = ask_myai(prompt)
+        reply = ask_myai(ctx.channel.id, prompt)
         await ctx.send(f"📢 **Announcement Draft:**\n{reply}")
     except Exception as e:
         print("GROQ ERROR:", repr(e))
         await ctx.send("Something broke 😅")
 
-
-@bot.command()
-async def rules(ctx):
-    await ctx.send(
-        "**Server Rules**\n"
-        "1. Be respectful\n"
-        "2. No weird spam\n"
-        "3. Keep drama low\n"
-        "4. Use the right channels\n"
-        "5. Have fun"
-    )
-
-
-@bot.command()
-async def faq(ctx):
-    await ctx.send(
-        "**FAQ**\n"
-        "- Ideas channel: `#stream-ideas-plans`\n"
-        "- Random chat: `#off-topic`\n"
-        "- Announcements: `#announcements`\n"
-    )
-
-
-@bot.command()
-@commands.has_permissions(manage_channels=True)
-async def makechannel(ctx, *, name):
-    clean_name = name.lower().replace(" ", "-")
-    existing = discord.utils.get(ctx.guild.text_channels, name=clean_name)
-
-    if existing:
-        await ctx.send(f"That channel already exists: #{existing.name}")
-        return
-
-    channel = await ctx.guild.create_text_channel(clean_name)
-    await ctx.send(f"Made the channel {channel.mention}")
-
-
-@bot.command()
-@commands.has_permissions(manage_roles=True)
-async def makerole(ctx, *, name):
-    existing = discord.utils.get(ctx.guild.roles, name=name)
-
-    if existing:
-        await ctx.send(f"That role already exists: **{existing.name}**")
-        return
-
-    role = await ctx.guild.create_role(name=name)
-    await ctx.send(f"Made the role **{role.name}**")
-
-
-@bot.command()
-@commands.has_permissions(manage_roles=True)
-async def giverole(ctx, member: discord.Member, *, role_name):
-    role = discord.utils.get(ctx.guild.roles, name=role_name)
-
-    if not role:
-        await ctx.send(f"I couldn't find a role named **{role_name}**")
-        return
-
-    await member.add_roles(role)
-    await ctx.send(f"Gave **{role.name}** to {member.mention}")
-
-
-@bot.command()
-@commands.has_permissions(manage_nicknames=True)
-async def nickname(ctx, member: discord.Member, *, new_nick):
-    try:
-        await member.edit(nick=new_nick)
-        await ctx.send(f"Changed {member.mention}'s nickname to **{new_nick}**")
-    except Exception as e:
-        print("NICKNAME COMMAND ERROR:", repr(e))
-        await ctx.send("I couldn't change that nickname.")
-
-
 @bot.command()
 async def helpme(ctx):
     await ctx.send(
-        "**MyAI Server Assistant Commands**\n"
+        "**MyAI Commands**\n"
         "`!ask <question>` - Ask MyAI something\n"
         "`!announce <topic>` - Draft an announcement\n"
-        "`!rules` - Show rules\n"
-        "`!faq` - Show FAQ\n"
-        "`!makechannel <name>` - Create a text channel\n"
-        "`!makerole <name>` - Create a role\n"
-        "`!giverole @user <role>` - Give a role\n"
-        "`!nickname @user <new name>` - Change nickname\n"
+        "`!clearmemory` - Clear this channel's memory\n"
     )
-
-
-@makechannel.error
-@makerole.error
-@giverole.error
-@nickname.error
-async def admin_command_error(ctx, error):
-    if isinstance(error, commands.MissingPermissions):
-        await ctx.send("You don't have permission to use that command.")
-    elif isinstance(error, commands.MissingRequiredArgument):
-        await ctx.send("You're missing part of the command.")
-    elif isinstance(error, commands.MemberNotFound):
-        await ctx.send("I couldn't find that member.")
-    else:
-        print("COMMAND ERROR:", repr(error))
-        await ctx.send("That command failed.")
-
 
 bot.run(DISCORD_TOKEN)
