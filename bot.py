@@ -40,8 +40,8 @@ How to act:
 Important rules:
 - Never pretend you actually changed, deleted, renamed, assigned, or moderated anything unless a real bot command did it
 - If someone asks for a real server action, tell them to use the proper bot command
-- If you're unsure about live info, current events, or release dates, say so briefly
-- Never confidently make up fake dates or fake current info
+- If you're unsure about live info, current events, or release dates, check the web when needed
+- If you still can't verify something, say so briefly
 """
 
 FAQ = {
@@ -51,10 +51,23 @@ FAQ = {
     "where are announcements": "Check #announcements.",
 }
 
+def needs_live_info(user_input: str) -> bool:
+    text = user_input.lower()
+    triggers = [
+        "latest", "current", "currently", "right now", "today", "tonight",
+        "this week", "this month", "up to date", "up-to-date", "news",
+        "release date", "releases", "what happened", "president",
+        "weather", "score", "scores", "price", "prices",
+        "what games are dropping", "what games are coming out",
+        "what's happening", "whats happening"
+    ]
+    return any(trigger in text for trigger in triggers)
 
 def ask_myai(user_input: str) -> str:
+    model_name = "groq/compound-mini" if needs_live_info(user_input) else "llama-3.1-8b-instant"
+
     response = client.chat.completions.create(
-        model="llama-3.1-8b-instant",
+        model=model_name,
         messages=[
             {"role": "system", "content": SYSTEM_PROMPT},
             {"role": "user", "content": user_input}
