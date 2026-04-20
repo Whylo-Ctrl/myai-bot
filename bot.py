@@ -24,12 +24,10 @@ intents.members = True
 
 bot = commands.Bot(command_prefix="!", intents=intents, help_command=None)
 
-# ---------------------------
-# MEMORY
-# ---------------------------
-# Keeps the last few messages per channel so replies feel more natural.
-channel_memory = defaultdict(lambda: deque(maxlen=12))
+# -------- memory --------
+channel_memory = defaultdict(lambda: deque(maxlen=14))
 
+# -------- faq --------
 FAQ = {
     "what is this server": "This is The GuBz Family server — a place for gaming, streaming, ideas, and community stuff.",
     "where do i post ideas": "Drop ideas in #stream-ideas-plans.",
@@ -37,32 +35,54 @@ FAQ = {
     "where are announcements": "Check #announcements.",
 }
 
-SYSTEM_PROMPT = f"""
-You are MyAI, a real-feeling Discord server assistant.
+# -------- personality modes --------
+PERSONALITY_MODES = {
+    "assistant": """
+You are MyAI, a real-feeling Discord assistant.
+Be casual, helpful, confident, and human.
+Keep replies short to medium.
+Do not sound robotic.
+Never say 'as an AI'.
+""",
+    "funny": """
+You are MyAI, a funny Discord friend.
+Be playful, witty, and casual.
+Roast lightly if the vibe fits.
+Keep it entertaining, but do not get hateful or extreme.
+""",
+    "streamer": """
+You are MyAI, a streamer-style Discord friend.
+Be energetic, funny, confident, and hype.
+Sound like someone who lives in gaming/stream chat.
+Keep replies punchy and natural.
+""",
+    "savage": """
+You are MyAI, a bold, funny Discord friend.
+Be sarcastic, playful, and a little disrespectful in a joking way.
+Do not get hateful, threatening, or explicit.
+Keep it entertaining and sharp.
+"""
+}
 
+current_mode = {"name": "streamer"}
+
+def build_system_prompt() -> str:
+    return f"""
 Today's date is {datetime.now().strftime("%B %d, %Y")}.
 The current year is {datetime.now().year}.
 
-How to act:
-- Talk like a real person in Discord
-- Be casual, natural, confident, and helpful
-- Keep replies short to medium
-- Sound human, not robotic
-- Never say "as an AI"
-- Never sound like customer support
-- Be funny, streamer-ish, and socially aware, but not cringe
-- Match the vibe of the chat
+{PERSONALITY_MODES[current_mode["name"]]}
 
-Important rules:
-- Never pretend you changed, renamed, assigned, deleted, or created anything unless the real bot logic already did it
+Rules:
+- Talk like a real person in Discord
+- Match the chat vibe
+- Never pretend you changed, renamed, assigned, created, or deleted anything unless the real bot logic already did it
 - Never tell users to use commands if the bot can already handle the action
-- If something is current/live and you aren't fully sure, say so briefly
-- Do not make up fake release dates, fake trends, or fake current events
+- If a question is about current events, news, politics, games trending right now, release dates, prices, scores, weather, or anything time-sensitive, use live info when available
+- If something still cannot be verified, say so briefly instead of making it up
 """
 
-# ---------------------------
-# HELPERS
-# ---------------------------
+# -------- helpers --------
 def needs_live_info(text: str) -> bool:
     text = text.lower()
     triggers = [
@@ -72,7 +92,7 @@ def needs_live_info(text: str) -> bool:
         "weather", "score", "scores", "price", "prices",
         "what games are dropping", "what games are coming out",
         "trending", "trend", "popular right now", "hot right now",
-        "stream right now", "best game to stream right now"
+        "best game to stream right now", "what should i stream right now"
     ]
     return any(trigger in text for trigger in triggers)
 
@@ -80,23 +100,23 @@ def should_auto_reply(message: discord.Message) -> bool:
     if bot.user in message.mentions:
         return True
 
-    # Make a dedicated channel like #ai-chat or #myai for free-flow convo
     if message.channel.name in {"ai-chat", "myai", "ask-myai"}:
         return True
 
-    # Lightweight natural triggers
     content = message.content.lower()
-    triggers = ["myai", "bot", "whylo ai"]
-    return any(trigger in content for trigger in triggers)
+    soft_triggers = ["myai", "whylo ai"]
+    return any(trigger in content for trigger in soft_triggers)
 
 def build_messages(channel_id: int, user_input: str):
-    messages = [{"role": "system", "content": SYSTEM_PROMPT}]
+    messages = [{"role": "system", "content": build_system_prompt()}]
     for role, content in channel_memory[channel_id]:
         messages.append({"role": role, "content": content})
     messages.append({"role": "user", "content": user_input})
     return messages
 
 def ask_myai(channel_id: int, user_input: str) -> str:
+    # live/current questions use Groq compound-mini
+    # normal chat uses llama-3.1-8b-instant
     model_name = "groq/compound-mini" if needs_live_info(user_input) else "llama-3.1-8b-instant"
 
     response = client.chat.completions.create(
@@ -113,21 +133,15 @@ def ask_myai(channel_id: int, user_input: str) -> str:
     if "it's currently 2024" in lowered or "it is currently 2024" in lowered:
         reply = f"It's currently {datetime.now().year} 😅 my bad"
 
-    # Save short-term memory
     channel_memory[channel_id].append(("user", user_input))
     channel_memory[channel_id].append(("assistant", reply))
 
     return reply
 
 def extract_nickname(text: str) -> str | None:
-    patterns = [
-        r"(?:nickname|rename|change name).+?(?:to|as)\s+(.+)",
-    ]
-    for pattern in patterns:
-        match = re.search(pattern, text, re.IGNORECASE)
-        if match:
-            nick = match.group(1).strip()
-            return nick.strip('"').strip("'").strip()[:32]
+    match = re.search(r"(?:nickname|rename|change name).+?(?:to|as)\s+(.+)", text, re.IGNORECASE)
+    if match:
+        return match.group(1).strip().strip('"').strip("'")[:32]
     return None
 
 def extract_channel_name(text: str) -> str | None:
@@ -140,8 +154,7 @@ def extract_channel_name(text: str) -> str | None:
     for pattern in patterns:
         match = re.search(pattern, text, re.IGNORECASE)
         if match:
-            name = match.group(1).strip()
-            name = name.strip('"').strip("'").strip()
+            name = match.group(1).strip().strip('"').strip("'")
             name = name.lower().replace(" ", "-")
             name = re.sub(r"[^a-z0-9\-_]", "", name)
             return name[:100] if name else None
@@ -155,13 +168,10 @@ def extract_role_name(text: str) -> str | None:
     for pattern in patterns:
         match = re.search(pattern, text, re.IGNORECASE)
         if match:
-            name = match.group(1).strip()
-            return name.strip('"').strip("'").strip()
+            return match.group(1).strip().strip('"').strip("'")
     return None
 
-# ---------------------------
-# EVENTS
-# ---------------------------
+# -------- events --------
 @bot.event
 async def on_ready():
     print(f"{bot.user} is online!")
@@ -179,17 +189,14 @@ async def on_message(message):
 
     content_lower = message.content.lower()
 
-    # FAQ auto-replies
     for question, answer in FAQ.items():
         if question in content_lower and bot.user not in message.mentions:
             await message.channel.send(answer)
             return
 
-    # ---------------------------
-    # REAL ACTIONS FIRST
-    # ---------------------------
+    # -------- real actions first --------
 
-    # Nickname change
+    # rename / nickname
     if any(word in content_lower for word in ["nickname", "rename", "change name"]):
         target_member = None
         new_nick = extract_nickname(message.content)
@@ -213,7 +220,7 @@ async def on_message(message):
                 await message.channel.send("I couldn't change that nickname.")
             return
 
-    # Create channel
+    # create channel
     if "channel" in content_lower and any(word in content_lower for word in ["create", "make"]):
         channel_name = extract_channel_name(message.content)
         if channel_name:
@@ -221,7 +228,6 @@ async def on_message(message):
             if existing:
                 await message.channel.send(f"That channel already exists: {existing.mention}")
                 return
-
             try:
                 channel = await message.guild.create_text_channel(channel_name)
                 await message.channel.send(f"Created {channel.mention} 🔥")
@@ -232,7 +238,7 @@ async def on_message(message):
                 await message.channel.send("I couldn't create that channel.")
             return
 
-    # Create role
+    # create role
     if "role" in content_lower and any(word in content_lower for word in ["create", "make"]):
         role_name = extract_role_name(message.content)
         if role_name:
@@ -240,7 +246,6 @@ async def on_message(message):
             if existing:
                 await message.channel.send(f"That role already exists: **{existing.name}**")
                 return
-
             try:
                 role = await message.guild.create_role(name=role_name)
                 await message.channel.send(f"Made the role **{role.name}**")
@@ -251,7 +256,7 @@ async def on_message(message):
                 await message.channel.send("I couldn't create that role.")
             return
 
-    # Give role
+    # give role
     if "role" in content_lower and any(word in content_lower for word in ["give", "add"]):
         if message.mentions:
             member = message.mentions[0]
@@ -271,7 +276,6 @@ async def on_message(message):
                 if not role:
                     await message.channel.send(f"I couldn't find a role named **{role_name}**")
                     return
-
                 try:
                     await member.add_roles(role)
                     await message.channel.send(f"Gave **{role.name}** to {member.mention}")
@@ -282,9 +286,7 @@ async def on_message(message):
                     await message.channel.send("I couldn't give that role.")
                 return
 
-    # ---------------------------
-    # AI CHAT AFTER ACTIONS
-    # ---------------------------
+    # -------- AI after actions --------
     if should_auto_reply(message):
         user_input = message.content
         user_input = user_input.replace(f"<@{bot.user.id}>", "")
@@ -304,9 +306,7 @@ async def on_message(message):
 
     await bot.process_commands(message)
 
-# ---------------------------
-# COMMANDS
-# ---------------------------
+# -------- commands --------
 @bot.command()
 async def ask(ctx, *, question):
     try:
@@ -322,11 +322,20 @@ async def clearmemory(ctx):
     await ctx.send("Cleared chat memory for this channel.")
 
 @bot.command()
-async def announce(ctx, *, topic):
+async def mode(ctx, *, name):
+    name = name.lower().strip()
+    if name not in PERSONALITY_MODES:
+        await ctx.send("Modes: assistant, funny, streamer, savage")
+        return
+    current_mode["name"] = name
+    await ctx.send(f"My mode is now **{name}**")
+
+@bot.command()
+async def trendinggames(ctx):
     try:
-        prompt = f"Write a clean Discord server announcement about: {topic}"
+        prompt = "What games are trending right now for streaming and why? Keep it short and useful."
         reply = ask_myai(ctx.channel.id, prompt)
-        await ctx.send(f"📢 **Announcement Draft:**\n{reply}")
+        await ctx.send(reply)
     except Exception as e:
         print("GROQ ERROR:", repr(e))
         await ctx.send("Something broke 😅")
@@ -335,8 +344,9 @@ async def announce(ctx, *, topic):
 async def helpme(ctx):
     await ctx.send(
         "**MyAI Commands**\n"
-        "`!ask <question>` - Ask MyAI something\n"
-        "`!announce <topic>` - Draft an announcement\n"
+        "`!ask <question>` - Ask anything\n"
+        "`!mode <assistant|funny|streamer|savage>` - Change personality\n"
+        "`!trendinggames` - Check trending games right now\n"
         "`!clearmemory` - Clear this channel's memory\n"
     )
 
