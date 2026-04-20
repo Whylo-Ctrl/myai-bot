@@ -1,4 +1,5 @@
 import os
+from datetime import datetime
 
 import discord
 from discord.ext import commands
@@ -20,59 +21,59 @@ intents.message_content = True
 
 bot = commands.Bot(command_prefix="!", intents=intents, help_command=None)
 
-SYSTEM_PROMPT = """
-You are MyAI, a Discord assistant that talks like a real person.
+SYSTEM_PROMPT = f"""
+You are MyAI, a real-feeling Discord assistant.
 
-Personality:
-- Sound natural, casual, and human.
-- Be helpful, confident, and socially aware.
-- Keep replies conversational, not robotic.
-- Usually keep replies short to medium length.
-- Do not sound like customer support.
-- Do not say things like "As an AI language model".
-- Match the vibe of Discord chat.
-- You can be funny and warm.
-- If someone is joking, joke back naturally.
-- If someone asks for help, switch into clear assistant mode.
+Current date: {datetime.now().strftime("%B %d, %Y")}
+Current year: {datetime.now().year}
 
-Assistant behavior:
-- Help answer questions clearly.
-- Help write announcements, rules, captions, plans, and messages.
-- Help explain games, tech, streaming, and Discord stuff.
-- If unsure, say so briefly instead of making things up.
+How to act:
+- Talk like a real person in Discord
+- Be casual, natural, confident, and helpful
+- Keep replies short to medium unless more detail is needed
+- Never say "As an AI"
+- Never sound like customer support
+- You can be funny and human, but not cringe
+- If someone jokes, joke back naturally
+- If someone needs help, be clear and useful
+
+Important rules:
+- Always use the current date and year above for time-related questions
+- Never guess dates or years wrong
+- If you are unsure about current events, game release dates, breaking news, or live info, say you might not have exact live data
+- Do not make up fake release dates, fake news, or fake current events
+- If asked about live or current info, be honest and say they should double-check official sources if needed
+- If you do not know, say so briefly instead of pretending
 """
 
-def needs_live_info(text: str) -> bool:
-    text = text.lower()
-    keywords = [
-        "latest", "today", "right now", "current", "currently",
-        "up to date", "up-to-date", "news", "recent",
-        "score", "scores", "weather", "price", "prices",
-        "who won", "what happened", "this week", "this month"
-    ]
-    return any(word in text for word in keywords)
-
 def ask_myai(user_input: str) -> str:
-    model_name = "groq/compound-mini" if needs_live_info(user_input) else "llama-3.1-8b-instant"
-
     response = client.chat.completions.create(
-        model=model_name,
+        model="llama-3.1-8b-instant",
         messages=[
             {"role": "system", "content": SYSTEM_PROMPT},
             {"role": "user", "content": user_input}
         ]
     )
 
-    reply = response.choices[0].message.content or "I got nothing right now 😅"
+    reply = response.choices[0].message.content
+
+    if not reply:
+        reply = "I got nothing right now 😅"
 
     if len(reply) > 1900:
         reply = reply[:1900] + "..."
 
+    # Small safety fix for wrong year answers
+    if "it's currently 2024" in reply.lower() or "it is currently 2024" in reply.lower():
+        reply = f"It's currently {datetime.now().year} 😅 my bad"
+
     return reply
+
 
 @bot.event
 async def on_ready():
     print(f"{bot.user} is online!")
+
 
 @bot.event
 async def on_message(message):
@@ -85,8 +86,8 @@ async def on_message(message):
         user_input = user_input.replace(f"<@!{bot.user.id}>", "")
         user_input = user_input.strip()
 
-        if not user_input:
-            user_input = "Say hey like a real person."
+        if len(user_input) < 2:
+            return
 
         try:
             reply = ask_myai(user_input)
@@ -97,6 +98,7 @@ async def on_message(message):
 
     await bot.process_commands(message)
 
+
 @bot.command()
 async def ask(ctx, *, question):
     try:
@@ -106,51 +108,14 @@ async def ask(ctx, *, question):
         print("GROQ ERROR:", repr(e))
         await ctx.send("Something broke 😅")
 
-@bot.command()
-@commands.has_permissions(manage_channels=True)
-async def makechannel(ctx, *, name):
-    clean_name = name.lower().replace(" ", "-")
-    existing = discord.utils.get(ctx.guild.text_channels, name=clean_name)
-
-    if existing:
-        await ctx.send(f"That channel already exists: #{existing.name}")
-        return
-
-    channel = await ctx.guild.create_text_channel(clean_name)
-    await ctx.send(f"Made the channel {channel.mention}")
-
-@bot.command()
-@commands.has_permissions(manage_roles=True)
-async def makerole(ctx, *, name):
-    existing = discord.utils.get(ctx.guild.roles, name=name)
-
-    if existing:
-        await ctx.send(f"That role already exists: **{existing.name}**")
-        return
-
-    role = await ctx.guild.create_role(name=name)
-    await ctx.send(f"Made the role **{role.name}**")
-
-@bot.command()
-@commands.has_permissions(manage_roles=True)
-async def giverole(ctx, member: discord.Member, *, role_name):
-    role = discord.utils.get(ctx.guild.roles, name=role_name)
-
-    if not role:
-        await ctx.send(f"I couldn't find a role named **{role_name}**")
-        return
-
-    await member.add_roles(role)
-    await ctx.send(f"Gave **{role.name}** to {member.mention}")
 
 @bot.command()
 async def helpme(ctx):
     await ctx.send(
         "**MyAI Commands**\n"
-        "`!ask <question>` - Ask anything\n"
-        "`!makechannel <name>` - Create a channel\n"
-        "`!makerole <name>` - Create a role\n"
-        "`!giverole @user <role>` - Give a role\n"
+        "`!ask <question>` - Ask MyAI something\n"
+        "`!helpme` - Show commands\n"
     )
+
 
 bot.run(DISCORD_TOKEN)
