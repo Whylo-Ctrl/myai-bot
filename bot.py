@@ -25,23 +25,23 @@ bot = commands.Bot(command_prefix="!", intents=intents, help_command=None)
 SYSTEM_PROMPT = f"""
 You are MyAI, a real-feeling Discord server assistant.
 
-Current date: {datetime.now().strftime("%B %d, %Y")}
-Current year: {datetime.now().year}
+Today's date is {datetime.now().strftime("%B %d, %Y")}.
+The current year is {datetime.now().year}.
 
 How to act:
 - Talk like a real person in Discord
 - Be casual, natural, confident, and helpful
-- Keep replies short to medium unless more detail is needed
-- Never say "As an AI"
+- Keep replies short to medium
+- Sound human, not robotic
+- Never say "as an AI"
 - Never sound like customer support
-- You can be funny and human, but not cringe
+- You can be funny and chill, but not cringe
 
-Server assistant behavior:
-- Help users understand the server
-- Help write announcements, rules, captions, and plans
-- Help answer gaming, streaming, and Discord questions
-- If you are unsure about current events or live info, say so briefly
-- Never claim you changed the server unless a command actually did it
+Important rules:
+- Never pretend you actually changed, deleted, renamed, assigned, or moderated anything unless a real bot command did it
+- If someone asks for a real server action, tell them to use the proper bot command
+- If you're unsure about live info, current events, or release dates, say so briefly
+- Never confidently make up fake dates or fake current info
 """
 
 FAQ = {
@@ -50,6 +50,7 @@ FAQ = {
     "where do i post random stuff": "Use #off-topic for random convos.",
     "where are announcements": "Check #announcements.",
 }
+
 
 def ask_myai(user_input: str) -> str:
     response = client.chat.completions.create(
@@ -68,7 +69,8 @@ def ask_myai(user_input: str) -> str:
     if len(reply) > 1900:
         reply = reply[:1900] + "..."
 
-    if "it's currently 2024" in reply.lower() or "it is currently 2024" in reply.lower():
+    lowered = reply.lower()
+    if "it's currently 2024" in lowered or "it is currently 2024" in lowered:
         reply = f"It's currently {datetime.now().year} 😅 my bad"
 
     return reply
@@ -93,13 +95,11 @@ async def on_message(message):
 
     content = message.content.lower()
 
-    # FAQ auto replies
     for question, answer in FAQ.items():
-        if question in content:
+        if question in content and bot.user not in message.mentions:
             await message.channel.send(answer)
             return
 
-    # Mention-based AI replies
     if bot.user.mentioned_in(message):
         user_input = message.content
         user_input = user_input.replace(f"<@{bot.user.id}>", "")
@@ -107,6 +107,7 @@ async def on_message(message):
         user_input = user_input.strip()
 
         if len(user_input) < 2:
+            await message.channel.send("Yeah? What's up?")
             return
 
         try:
@@ -132,7 +133,7 @@ async def ask(ctx, *, question):
 @bot.command()
 async def announce(ctx, *, topic):
     try:
-        prompt = f"Write a Discord server announcement about: {topic}"
+        prompt = f"Write a clean Discord server announcement about: {topic}"
         reply = ask_myai(prompt)
         await ctx.send(f"📢 **Announcement Draft:**\n{reply}")
     except Exception as e:
@@ -203,25 +204,42 @@ async def giverole(ctx, member: discord.Member, *, role_name):
 
 
 @bot.command()
+@commands.has_permissions(manage_nicknames=True)
+async def nickname(ctx, member: discord.Member, *, new_nick):
+    try:
+        await member.edit(nick=new_nick)
+        await ctx.send(f"Changed {member.mention}'s nickname to **{new_nick}**")
+    except Exception as e:
+        print("NICKNAME ERROR:", repr(e))
+        await ctx.send("I couldn't change that nickname.")
+
+
+@bot.command()
 async def helpme(ctx):
     await ctx.send(
         "**MyAI Server Assistant Commands**\n"
-        "`!ask <question>` - Ask anything\n"
+        "`!ask <question>` - Ask MyAI something\n"
         "`!announce <topic>` - Draft an announcement\n"
         "`!rules` - Show rules\n"
         "`!faq` - Show FAQ\n"
         "`!makechannel <name>` - Create a text channel\n"
         "`!makerole <name>` - Create a role\n"
         "`!giverole @user <role>` - Give a role\n"
+        "`!nickname @user <new name>` - Change nickname\n"
     )
 
 
 @makechannel.error
 @makerole.error
 @giverole.error
+@nickname.error
 async def admin_command_error(ctx, error):
     if isinstance(error, commands.MissingPermissions):
         await ctx.send("You don't have permission to use that command.")
+    elif isinstance(error, commands.MissingRequiredArgument):
+        await ctx.send("You're missing part of the command.")
+    elif isinstance(error, commands.MemberNotFound):
+        await ctx.send("I couldn't find that member.")
     else:
         print("COMMAND ERROR:", repr(error))
         await ctx.send("That command failed.")
